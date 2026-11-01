@@ -3,7 +3,7 @@ import pathlib
 import re
 
 CODE = re.compile(r"(?<![\w/#-])(NFR-\d+|FR-\d+|AD-\d+|US-[A-Z]+-\d+|I\d{1,2})(?![\w-])")
-PROTECTED = re.compile(r"(```.*?```|`[^`\n]*`|!?\[[^\]]*\]\([^)]*\)|\{\{svg:[^}]*\}\}|^#{1,6} .*$)", re.S | re.M)
+PROTECTED = re.compile(r"(```.*?```|`[^`\n]*`|!?\[[^\]]*\]\([^)]*\)|\{\{svg:[^}]*\}\}|^#{1,6} [^\n]*$)", re.S | re.M)
 MARK = re.compile(r"\[\[([^\]|]+)\|([^\]]+)\]\]")
 
 
