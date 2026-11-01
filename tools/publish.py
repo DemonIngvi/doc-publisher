@@ -22,7 +22,8 @@ import uuid
 import yaml
 
 sys.path.insert(0, str(pathlib.Path(__file__).parent))
-from views import render  # noqa: E402
+from links import Links  # noqa: E402
+from views import Model, render, svg_for, tab_bar  # noqa: E402
 
 
 class Docmost:
@@ -47,6 +48,18 @@ class Docmost:
             "Content-Type: text/markdown\r\n\r\n"
         ).encode() + content.encode("utf-8") + f"\r\n--{boundary}--\r\n".encode()
         return self.post("/api/pages/import", raw=body, ctype=f"multipart/form-data; boundary={boundary}")["data"]["id"]
+
+
+    def upload(self, page_id, name, content):
+        """Загружает файл на страницу и возвращает его адрес для Markdown."""
+        boundary = uuid.uuid4().hex
+        kind = "image/svg+xml"
+        body = (
+            f'--{boundary}\r\nContent-Disposition: form-data; name="pageId"\r\n\r\n{page_id}\r\n'
+            f'--{boundary}\r\nContent-Disposition: form-data; name="file"; filename="{name}"\r\nContent-Type: {kind}\r\n\r\n'
+        ).encode() + content + f"\r\n--{boundary}--\r\n".encode()
+        saved = self.post("/api/files/upload", raw=body, ctype=f"multipart/form-data; boundary={boundary}")
+        return f"/api/files/{saved['id']}/{saved['fileName']}"
 
 
 def credentials(config, root):
@@ -81,18 +94,37 @@ def prepare(title, source, root, note):
     return f"# {title}\n\n{text.strip()}\n{meta}"
 
 
-def publish_tree(client, space_id, items, parent, root, errors):
-    """Создаёт страницы дерева любой глубины и сверяет, что содержимое сохранилось."""
-    count = 0
+def create_tree(client, space_id, items, parent, created):
+    """Первый проход: пустые страницы нужной иерархии, чтобы у всех появились адреса."""
     for index, item in enumerate(items):
-        content = page_text(item, root)
-        page_id = client.import_page(space_id, content)
+        page_id = client.import_page(space_id, f"# {item['title']}\n")
         client.post("/api/pages/move", {"pageId": page_id, "parentPageId": parent, "position": f"a{index:04d}"})
+        slug = client.post("/api/pages/info", {"pageId": page_id})["data"]["slugId"]
+        created.append((item, page_id, slug))
+        create_tree(client, space_id, item.get("children", []), page_id, created)
+
+
+def attach_images(client, page_id, content, root, model):
+    """Заменяет метки схем картинками: SVG строится скриптом и загружается на страницу."""
+    def replace(match):
+        name = f"{re.sub(r'[^A-Za-z0-9-]', '-', match.group(1))}.svg"
+        link = client.upload(page_id, name, svg_for(match.group(1), model).encode("utf-8"))
+        return f"![схема]({link})"
+    return re.sub(r"\{\{svg:([^}]+)\}\}", replace, content)
+
+
+def fill_tree(client, created, root, links, model, errors):
+    """Второй проход: содержимое со ссылками на уже известные адреса."""
+    for item, page_id, _ in created:
+        text = re.sub(r"\{\{seq:([^}]+)\}\}", lambda m: model.sequence_block(m.group(1)), page_text(item, root))
+        if item.get("component"):
+            text = re.sub(r"^(# .*\n)", lambda m: f"{m.group(1)}\n{tab_bar(item['component'], item.get('key'))}\n", text, count=1)
+        content = attach_images(client, page_id, links.apply(text, item), root, model)
+        body = re.sub(r"^# .*\n+", "", content, count=1)
+        client.post("/api/pages/update", {"pageId": page_id, "content": body, "format": "markdown", "operation": "replace"})
         saved = client.post("/api/pages/info", {"pageId": page_id, "format": "markdown"})["data"]["content"]
-        if len(saved) < 0.7 * len(content) or content.count("```mermaid") != saved.count("```mermaid"):
-            errors.append(f"{item['title']}: {len(content)} -> {len(saved)}")
-        count += 1 + publish_tree(client, space_id, item.get("children", []), page_id, root, errors)
-    return count
+        if body.count("```mermaid") != saved.count("```mermaid"):
+            errors.append(f"{item['title']}: схем было {body.count('```mermaid')}, стало {saved.count('```mermaid')}")
 
 
 def main():
@@ -114,8 +146,12 @@ def main():
     for page in client.post("/api/pages/sidebar-pages", {"spaceId": space_id, "limit": 100})["data"]["items"]:
         client.post("/api/pages/delete", {"pageId": page["id"], "permanentlyDelete": True})
 
-    errors = []
-    count = publish_tree(client, space_id, config["tree"], None, root, errors)
+    errors, created = [], []
+    create_tree(client, space_id, config["tree"], None, created)
+    model = Model(root)
+    links = Links(config["space"]["slug"], created, root, model)
+    fill_tree(client, created, root, links, model, errors)
+    count = len(created)
 
     print(f"Опубликовано страниц: {count}")
     print(f"Открыть: {config['url'].rstrip('/')}/s/{config['space']['slug']}")
