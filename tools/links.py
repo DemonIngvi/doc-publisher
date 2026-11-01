@@ -35,8 +35,23 @@ class Links:
                 parts.pop()
             elif part != ".":
                 parts.append(part)
-        slug = self.by_source.get("/".join(parts))
+        rel = "/".join(parts)
+        slug = self.by_source.get(rel) or self.by_key.get(self.owner_page(rel))
         return f"[{text}]({self.base}{slug})" if slug else text
+
+    @staticmethod
+    def owner_page(rel):
+        """Страница, которая показывает файл-владелец."""
+        patterns = ((r"components/([^/]+)/README\.md$", "comp:{}"), (r"components/([^/]+)/prd\.md$", "reqs:{}"), (r"components/([^/]+)/stories/", "stories:{}"),
+                    (r"components/([^/]+)/integrations/", "integrations:{}"), (r"components/([^/]+)/data/", "datamodel:{}"), (r"components/([^/]+)/sequences/", "sequences:{}"))
+        for pattern, key in patterns:
+            found = re.search(pattern, rel)
+            if found:
+                return key.format(found.group(1))
+        model = re.search(r"data/model-(.+)\.yaml$", rel)
+        if model:
+            return f"type:{model.group(1)}"
+        return "decisions" if "/decisions/" in rel else "registers" if "/integrations/" in rel else ""
 
     def code(self, match, own=None):
         key = self.codes.get(match.group(1), "")
@@ -61,7 +76,9 @@ class Links:
     def apply(self, text, item):
         text = MARK.sub(self.mark, text)
         if item.get("source"):
-            text = re.sub(r"(?<!!)\[([^\]]+)\]\((?!https?:|/|#|mailto:)([^)\s]+\.md(?:#[^)]*)?)\)", lambda m: self.path_link(m, item["source"]), text)
+            text = re.sub(r"(?<!!)\[([^\]]+)\]\((?!https?:|/|#|mailto:)([^)\s]+\.(?:md|yaml)(?:#[^)]*)?)\)", lambda m: self.path_link(m, item["source"]), text)
+        if item.get("source"):
+            return text
         pieces = PROTECTED.split(text)
         own = item.get("key")
         return "".join(self.inline(piece, own) if index % 2 else self.plain(piece, own) for index, piece in enumerate(pieces))

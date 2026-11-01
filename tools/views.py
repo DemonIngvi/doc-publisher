@@ -332,7 +332,7 @@ def home(model):
         rows.append([f"**{comp(model, key)}**", unit["responsibility"], sum(s["component"] == key for s in stories), sum(o == key for o, _ in model.blocks), len(inputs), len(outputs)])
     state = model.report.get("readiness", {})
     links = " · ".join(f"[[{k}|{t}]]" for k, t in (("readiness", "Панель готовности"), ("c1", "C1"), ("c2", "C2"), ("dfd", "Потоки данных"), ("er", "Модель данных"), ("registers", "Реестры"), ("decisions", "Решения")))
-    return "\n\n".join([f":::info\nГотовность **{state.get('score', '?')} из 100**, блокеров **{model.report.get('blockers', '?')}**. Быстрый переход: {links}\n:::", "{{svg:map}}", "## Компоненты",
+    return "\n\n".join([f":::info\nГотовность **{state.get('score', '?')} из 100**, блокеров **{model.report.get('blockers', '?')}**. Разделы: {links}\n:::", "## Компоненты",
                           table(["Компонент", "Отвечает за", "Историй", "Блоков", "Входов", "Выходов"], rows)])
 
 
@@ -358,17 +358,21 @@ def component_view(model, key):
     return "\n\n".join(parts)
 
 
-TABS = (("comp", "Паспорт"), ("stories", "User Stories"), ("integrations", "Интеграции"), ("reqs", "Спека"), ("trace", "Трассировка"), ("blocks", "Блоки"),
-        ("datamodel", "Данные"), ("sequences", "Сценарии"), ("how", "Как работает"), ("tech", "Deploy"), ("find", "Замечания"))
+TABS = (("comp", ""), ("stories", "User Stories"), ("integrations", "Интеграции"), ("reqs", "Спека"), ("trace", "Трассировка"), ("blocks", "Блоки"),
+        ("datamodel", "Данные и потоки"), ("sequences", "Сценарии"), ("how", "Как работает"), ("tech", "Deploy"), ("find", "Замечания"))
 
 
-def tab_bar(key, current):
-    """Вкладки компонента на каждой его странице."""
+def tab_bar(key, current, pages, model):
+    """Разделы компонента: только страницы, которые есть, текущая без перехода."""
     items = []
     for tab, title in TABS:
         name = f"{tab}:{key}"
-        items.append(f"**{title}**" if name == current else f"[[{name}|{title}]]")
-    return "📑 " + " · ".join(items)
+        title = title or model.title(key)
+        if name == current:
+            items.append(f"**{title}**")
+        elif name in pages:
+            items.append(f"[[{name}|{title}]]")
+    return " · ".join(items)
 
 
 SCALE = ((90, "готова"), (75, "почти"), (60, "в работе"), (40, "черновик"), (0, "заготовка"))
@@ -380,7 +384,8 @@ def requirements(model, key):
     if not path.exists():
         return []
     found = []
-    for match in re.finditer(r"^#### (FR-\d+): (.+?)\n(.*?)(?=^#{3,4} |\Z)", path.read_text(encoding="utf-8"), re.M | re.S):
+    source = re.sub(r"(?<!!)\[([^\]]+)\]\((?!https?:)[^)]*\)", r"\1", path.read_text(encoding="utf-8"))
+    for match in re.finditer(r"^#### (FR-\d+): (.+?)\n(.*?)(?=^#{3,4} |\Z)", source, re.M | re.S):
         found.append((match.group(1), match.group(2), match.group(3), len(re.findall(r"^- ", match.group(3), re.M))))
     return found
 

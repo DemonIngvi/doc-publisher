@@ -94,6 +94,22 @@ def prepare(title, source, root, note):
     return f"# {title}\n\n{text.strip()}\n{meta}"
 
 
+def used_views(items):
+    for item in items:
+        if item.get("view"):
+            yield item["view"].split(":")[0]
+        yield from used_views(item.get("children", []))
+
+
+def check_catalog(tree, root):
+    """Вид без описания в каталоге не публикуется: страница должна иметь основание в документации."""
+    path = root / "docs" / "views.yaml"
+    known = set(yaml.safe_load(path.read_text(encoding="utf-8"))["views"]) if path.exists() else set()
+    missing = sorted(set(used_views(tree)) - known)
+    if missing:
+        raise SystemExit(f"Нет в docs/views.yaml: {', '.join(missing)}")
+
+
 def create_tree(client, space_id, items, parent, created):
     """Первый проход: пустые страницы нужной иерархии, чтобы у всех появились адреса."""
     for index, item in enumerate(items):
@@ -113,18 +129,46 @@ def attach_images(client, page_id, content, root, model):
     return re.sub(r"\{\{svg:([^}]+)\}\}", replace, content)
 
 
+def mention(entry, creator):
+    return {"type": "mention", "attrs": {"id": uuid.uuid4().hex, "label": entry["title"], "entityType": "page", "entityId": entry["id"], "slugId": entry["slug"], "creatorId": creator}}
+
+
+def to_mentions(node, pages, creator):
+    """Ссылка с названием страницы становится упоминанием: обычная ссылка Docmost открывает окно, а не страницу."""
+    changed = 0
+    children = []
+    for child in node.get("content", []):
+        marks = [m for m in child.get("marks", []) if m["type"] == "link"]
+        slug = marks[0]["attrs"]["href"].rsplit("/", 1)[-1] if marks else ""
+        if child.get("type") == "text" and slug in pages and child["text"].strip() == pages[slug]["title"]:
+            children.append(mention(pages[slug], creator))
+            changed += 1
+        else:
+            changed += to_mentions(child, pages, creator)
+            children.append(child)
+    if "content" in node:
+        node["content"] = children
+    return changed
+
+
 def fill_tree(client, created, root, links, model, errors):
     """Второй проход: содержимое со ссылками на уже известные адреса."""
+    pages = {slug: {"id": page_id, "slug": slug, "title": item["title"]} for item, page_id, slug in created}
     for item, page_id, _ in created:
         text = re.sub(r"\{\{seq:([^}]+)\}\}", lambda m: model.sequence_block(m.group(1)), page_text(item, root))
         if item.get("component"):
-            text = re.sub(r"^(# .*\n)", lambda m: f"{m.group(1)}\n{tab_bar(item['component'], item.get('key'))}\n", text, count=1)
+            bar = tab_bar(item["component"], item.get("key"), links.by_key, model)
+            text = re.sub(r"^(# .*\n)", lambda m: f"{m.group(1)}\n{bar}\n", text, count=1)
         content = attach_images(client, page_id, links.apply(text, item), root, model)
         body = re.sub(r"^# .*\n+", "", content, count=1)
         client.post("/api/pages/update", {"pageId": page_id, "content": body, "format": "markdown", "operation": "replace"})
         saved = client.post("/api/pages/info", {"pageId": page_id, "format": "markdown"})["data"]["content"]
         if body.count("```mermaid") != saved.count("```mermaid"):
             errors.append(f"{item['title']}: схем было {body.count('```mermaid')}, стало {saved.count('```mermaid')}")
+        if "](/s/" in saved:
+            info = client.post("/api/pages/info", {"pageId": page_id, "format": "json"})["data"]
+            if to_mentions(info["content"], pages, info["creatorId"]):
+                client.post("/api/pages/update", {"pageId": page_id, "content": info["content"], "format": "json", "operation": "replace"})
 
 
 def main():
@@ -133,6 +177,7 @@ def main():
     args = parser.parse_args()
     root = args.root.resolve()
     config = yaml.safe_load((root / "docmost.yaml").read_text(encoding="utf-8"))
+    check_catalog(config["tree"], root)
     client = Docmost(config["url"].rstrip("/"))
     email, password = credentials(config, root)
     client.post("/api/auth/login", {"email": email, "password": password})
