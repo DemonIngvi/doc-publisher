@@ -57,7 +57,7 @@ def credentials(config, root):
     return values["email"], values["password"]
 
 
-def page(item, root):
+def page_text(item, root):
     if item.get("view"):
         return render(item["view"], item["title"], root)
     return prepare(item["title"], item.get("source"), root, item.get("note"))
@@ -102,11 +102,11 @@ def main():
 
     count, errors = 0, []
     for i, item in enumerate(config["tree"]):
-        page_id = client.import_page(space_id, page(item, root))
+        page_id = client.import_page(space_id, page_text(item, root))
         client.post("/api/pages/move", {"pageId": page_id, "parentPageId": None, "position": f"a{i:04d}"})
         count += 1
         for j, child in enumerate(item.get("children", [])):
-            content = page(child, root)
+            content = page_text(child, root)
             child_id = client.import_page(space_id, content)
             client.post("/api/pages/move", {"pageId": child_id, "parentPageId": page_id, "position": f"a{j:04d}"})
             count += 1
