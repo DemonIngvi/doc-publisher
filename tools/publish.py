@@ -6,15 +6,18 @@
 """Публикует документацию проекта в Docmost по файлу docmost.yaml.
 
 Запуск: uv run publish.py --root <проект>
-Источник правды — файлы проекта: повторный запуск заменяет все страницы пространства.
+Источник правды — файлы проекта. Обновляются только изменившиеся страницы, адреса страниц постоянны.
+Ход работы пишется в _quality/publish-progress.json.
 """
 import argparse
+import hashlib
 import http.cookiejar
 import json
 import os
 import pathlib
 import re
 import sys
+import time
 import urllib.error
 import urllib.request
 import uuid
@@ -70,9 +73,9 @@ def credentials(config, root):
     return values["email"], values["password"]
 
 
-def page_text(item, root):
+def page_text(item, root, model=None):
     if item.get("view"):
-        return render(item["view"], item["title"], root)
+        return render(item["view"], item["title"], root, model)
     return prepare(item["title"], item.get("source"), root, item.get("note"))
 
 
@@ -110,23 +113,58 @@ def check_catalog(tree, root):
         raise SystemExit(f"Нет в docs/views.yaml: {', '.join(missing)}")
 
 
-def create_tree(client, space_id, items, parent, created):
-    """Первый проход: пустые страницы нужной иерархии, чтобы у всех появились адреса."""
+def sync_tree(client, space_id, items, parent, state, prefix, created):
+    """Находит страницы дерева или создаёт недостающие. Адрес существующей страницы не меняется."""
+    existing = None
     for index, item in enumerate(items):
-        page_id = client.import_page(space_id, f"# {item['title']}\n")
-        client.post("/api/pages/move", {"pageId": page_id, "parentPageId": parent, "position": f"a{index:04d}"})
-        slug = client.post("/api/pages/info", {"pageId": page_id})["data"]["slugId"]
-        created.append((item, page_id, slug))
-        create_tree(client, space_id, item.get("children", []), page_id, created)
+        ident = f"{prefix}/{item['title']}"
+        entry = state.get(ident)
+        if not entry:
+            if existing is None:
+                request = {"spaceId": space_id, "limit": 100, **({"pageId": parent} if parent else {})}
+                existing = {p["title"]: p for p in client.post("/api/pages/sidebar-pages", request)["data"]["items"]}
+            found = existing.get(item["title"])
+            if found:
+                entry = {"id": found["id"], "slug": found["slugId"], "hash": ""}
+            else:
+                page_id = client.import_page(space_id, f"# {item['title']}\n")
+                client.post("/api/pages/move", {"pageId": page_id, "parentPageId": parent, "position": f"a{index:04d}"})
+                entry = {"id": page_id, "slug": client.post("/api/pages/info", {"pageId": page_id})["data"]["slugId"], "hash": ""}
+            state[ident] = entry
+        created.append((item, entry["id"], entry["slug"], ident))
+        sync_tree(client, space_id, item.get("children", []), entry["id"], state, ident, created)
 
 
-def attach_images(client, page_id, content, root, model):
+def attach_images(client, page_id, content, model):
     """Заменяет метки схем картинками: SVG строится скриптом и загружается на страницу."""
     def replace(match):
         name = f"{re.sub(r'[^A-Za-z0-9-]', '-', match.group(1))}.svg"
         link = client.upload(page_id, name, svg_for(match.group(1), model).encode("utf-8"))
         return f"![схема]({link})"
     return re.sub(r"\{\{svg:([^}]+)\}\}", replace, content)
+
+
+def page_hash(content, model):
+    """Отпечаток страницы вместе с её схемами: схема меняется и без правки текста."""
+    digest = hashlib.sha256(content.encode("utf-8"))
+    for name in re.findall(r"\{\{svg:([^}]+)\}\}", content):
+        digest.update(svg_for(name, model).encode("utf-8"))
+    return digest.hexdigest()
+
+
+class Progress:
+    """Файл состояния публикации: его читает интерфейс, чтобы показать ход и оставшееся время."""
+
+    def __init__(self, path, total):
+        self.path, self.total, self.started = path, total, time.time()
+        self.changed, self.done = 0, 0
+        self.path.parent.mkdir(exist_ok=True)
+
+    def write(self, status, current=""):
+        elapsed = time.time() - self.started
+        left = round(elapsed / self.done * (self.changed - self.done)) if self.done else None
+        self.path.write_text(json.dumps({"status": status, "total": self.total, "changed": self.changed, "done": self.done, "current": current,
+                                         "elapsed_seconds": round(elapsed), "left_seconds": left}, ensure_ascii=False), encoding="utf-8")
 
 
 def mention(entry, creator):
@@ -151,34 +189,39 @@ def to_mentions(node, pages, creator):
     return changed
 
 
-def fill_tree(client, created, root, links, model, errors):
-    """Второй проход: содержимое со ссылками на уже известные адреса."""
-    pages = {slug: {"id": page_id, "slug": slug, "title": item["title"]} for item, page_id, slug in created}
-    for item, page_id, _ in created:
-        text = re.sub(r"\{\{seq:([^}]+)\}\}", lambda m: model.sequence_block(m.group(1)), page_text(item, root))
-        if item.get("component"):
-            bar = tab_bar(item["component"], item.get("key"), links.by_key, model)
-            text = re.sub(r"^(# .*\n)", lambda m: f"{m.group(1)}\n{bar}\n", text, count=1)
-        content = attach_images(client, page_id, links.apply(text, item), root, model)
-        body = re.sub(r"^# .*\n+", "", content, count=1)
-        client.post("/api/pages/update", {"pageId": page_id, "content": body, "format": "markdown", "operation": "replace"})
-        saved = client.post("/api/pages/info", {"pageId": page_id, "format": "markdown"})["data"]["content"]
-        if body.count("```mermaid") != saved.count("```mermaid"):
-            errors.append(f"{item['title']}: схем было {body.count('```mermaid')}, стало {saved.count('```mermaid')}")
-        if "/s/" in saved:
-            info = client.post("/api/pages/info", {"pageId": page_id, "format": "json"})["data"]
-            if to_mentions(info["content"], pages, info["creatorId"]):
-                client.post("/api/pages/update", {"pageId": page_id, "content": info["content"], "format": "json", "operation": "replace"})
+def build_page(item, root, links, model):
+    text = re.sub(r"\{\{seq:([^}]+)\}\}", lambda m: model.sequence_block(m.group(1)), page_text(item, root, model))
+    if item.get("component"):
+        bar = tab_bar(item["component"], item.get("key"), links.by_key, model)
+        text = re.sub(r"^(# .*\n)", lambda m: f"{m.group(1)}\n{bar}\n", text, count=1)
+    return links.apply(text, item)
+
+
+def update_page(client, page_id, content, pages, model, title, errors):
+    body = re.sub(r"^# .*\n+", "", attach_images(client, page_id, content, model), count=1)
+    client.post("/api/pages/update", {"pageId": page_id, "content": body, "format": "markdown", "operation": "replace"})
+    saved = client.post("/api/pages/info", {"pageId": page_id, "format": "markdown"})["data"]["content"]
+    if body.count("```mermaid") != saved.count("```mermaid"):
+        errors.append(f"{title}: схем было {body.count('```mermaid')}, стало {saved.count('```mermaid')}")
+    if "/s/" in saved:
+        info = client.post("/api/pages/info", {"pageId": page_id, "format": "json"})["data"]
+        if to_mentions(info["content"], pages, info["creatorId"]):
+            client.post("/api/pages/update", {"pageId": page_id, "content": info["content"], "format": "json", "operation": "replace"})
+
+
+def load_state(path):
+    return json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--root", default=".", type=pathlib.Path)
+    parser.add_argument("--force", action="store_true", help="Обновить все страницы, даже без изменений")
     args = parser.parse_args()
     root = args.root.resolve()
     config = yaml.safe_load((root / "docmost.yaml").read_text(encoding="utf-8"))
     check_catalog(config["tree"], root)
-    client = Docmost(config["url"].rstrip("/"))
+    client = Docmost(os.environ.get("DOCMOST_URL") or config["url"].rstrip("/"))
     email, password = credentials(config, root)
     client.post("/api/auth/login", {"email": email, "password": password})
 
@@ -186,19 +229,37 @@ def main():
     space = next((s for s in spaces if s["slug"] == config["space"]["slug"]), None)
     if space is None:
         space = client.post("/api/spaces/create", config["space"])["data"]
-    space_id = space["id"]
 
-    for page in client.post("/api/pages/sidebar-pages", {"spaceId": space_id, "limit": 100})["data"]["items"]:
-        client.post("/api/pages/delete", {"pageId": page["id"], "permanentlyDelete": True})
-
-    errors, created = [], []
-    create_tree(client, space_id, config["tree"], None, created)
+    state_path = root / ".doc-kit" / "docmost-state.json"
+    state = load_state(state_path)
+    progress = Progress(root / "_quality" / "publish-progress.json", 0)
+    progress.write("подготовка")
+    created, errors = [], []
+    sync_tree(client, space["id"], config["tree"], None, state, "", created)
+    live = {ident for *_, ident in created}
+    for ident in sorted(set(state) - live, key=len, reverse=True):
+        client.post("/api/pages/delete", {"pageId": state.pop(ident)["id"], "permanentlyDelete": True})
     model = Model(root)
-    links = Links(config["space"]["slug"], created, root, model)
-    fill_tree(client, created, root, links, model, errors)
-    count = len(created)
-
-    print(f"Опубликовано страниц: {count}")
+    links = Links(config["space"]["slug"], [row[:3] for row in created], root, model)
+    pages = {slug: {"id": page_id, "slug": slug, "title": item["title"]} for item, page_id, slug, _ in created}
+    queue = []
+    for item, page_id, _, ident in created:
+        content = build_page(item, root, links, model)
+        digest = page_hash(content, model)
+        if args.force or state[ident].get("hash") != digest:
+            queue.append((item, page_id, ident, content, digest))
+    progress.total, progress.changed = len(created), len(queue)
+    for item, page_id, ident, content, digest in queue:
+        progress.write("публикация", item["title"])
+        update_page(client, page_id, content, pages, model, item["title"], errors)
+        state[ident]["hash"] = digest
+        progress.done += 1
+        state_path.parent.mkdir(exist_ok=True)
+        state_path.write_text(json.dumps(state, ensure_ascii=False), encoding="utf-8")
+    state_path.parent.mkdir(exist_ok=True)
+    state_path.write_text(json.dumps(state, ensure_ascii=False), encoding="utf-8")
+    progress.write("ошибка" if errors else "готово")
+    print(f"Страниц: {len(created)}, обновлено: {len(queue)}, за {round(time.time() - progress.started)} с")
     print(f"Открыть: {config['url'].rstrip('/')}/s/{config['space']['slug']}")
     print("\n".join(errors) if errors else "Содержимое сохранилось")
     sys.exit(1 if errors else 0)

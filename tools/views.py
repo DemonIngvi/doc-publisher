@@ -461,7 +461,7 @@ def neighbours(model, key):
                 pairs[(a, b)].append(tag)
         elif key in unit.get("also", []):
             dotted[unit["from"]].append(code)
-    for name in {x for pair in pairs for x in pair} | set(dotted):
+    for name in sorted({x for pair in pairs for x in pair} | set(dotted)):
         if name != key:
             style = "comp" if name in model.components else "ext"
             lines.append(f'  {node(name)}["{label(model.title(name))}"]:::{style}')
@@ -726,9 +726,9 @@ VIEWS = {"home": home, "component": component_view, "trace": trace_view, "datamo
          "seqall": sequences_all, "integrations": integrations_view, "spec": spec_view, "type": type_view, "types": types_index, "decisions": decisions_view, "c1": c1, "c2": c2, "c3": c3, "cards": cards, "stories": stories_view, "how": how_it_works, "data": data_view, "registers": registers, "coverage": coverage, "readiness": readiness}
 
 
-def render(name, title, root):
+def render(name, title, root, model=None):
     """Имя вида может нести аргумент: stories:agent-runner."""
     view, _, argument = name.partition(":")
-    model = Model(root)
+    model = model or Model(root)
     body = VIEWS[view](model, argument) if argument else VIEWS[view](model)
     return f"# {title}\n\n> Страница собрана из файлов проекта, правьте источник.\n\n{body}\n"
