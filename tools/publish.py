@@ -21,6 +21,9 @@ import uuid
 
 import yaml
 
+sys.path.insert(0, str(pathlib.Path(__file__).parent))
+from views import render  # noqa: E402
+
 
 class Docmost:
     def __init__(self, base):
@@ -52,6 +55,12 @@ def credentials(config, root):
     path = (root / config["credentials"]).resolve()
     values = dict(line.split(": ", 1) for line in path.read_text(encoding="utf-8").splitlines())
     return values["email"], values["password"]
+
+
+def page(item, root):
+    if item.get("view"):
+        return render(item["view"], item["title"], root)
+    return prepare(item["title"], item.get("source"), root, item.get("note"))
 
 
 def prepare(title, source, root, note):
@@ -93,11 +102,11 @@ def main():
 
     count, errors = 0, []
     for i, item in enumerate(config["tree"]):
-        page_id = client.import_page(space_id, prepare(item["title"], item.get("source"), root, item.get("note")))
+        page_id = client.import_page(space_id, page(item, root))
         client.post("/api/pages/move", {"pageId": page_id, "parentPageId": None, "position": f"a{i:04d}"})
         count += 1
         for j, child in enumerate(item.get("children", [])):
-            content = prepare(child["title"], child.get("source"), root, child.get("note"))
+            content = page(child, root)
             child_id = client.import_page(space_id, content)
             client.post("/api/pages/move", {"pageId": child_id, "parentPageId": page_id, "position": f"a{j:04d}"})
             count += 1
