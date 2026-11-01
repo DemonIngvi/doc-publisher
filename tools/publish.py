@@ -165,7 +165,7 @@ def fill_tree(client, created, root, links, model, errors):
         saved = client.post("/api/pages/info", {"pageId": page_id, "format": "markdown"})["data"]["content"]
         if body.count("```mermaid") != saved.count("```mermaid"):
             errors.append(f"{item['title']}: схем было {body.count('```mermaid')}, стало {saved.count('```mermaid')}")
-        if "](/s/" in saved:
+        if "/s/" in saved:
             info = client.post("/api/pages/info", {"pageId": page_id, "format": "json"})["data"]
             if to_mentions(info["content"], pages, info["creatorId"]):
                 client.post("/api/pages/update", {"pageId": page_id, "content": info["content"], "format": "json", "operation": "replace"})
