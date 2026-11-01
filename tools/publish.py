@@ -81,6 +81,20 @@ def prepare(title, source, root, note):
     return f"# {title}\n\n{text.strip()}\n{meta}"
 
 
+def publish_tree(client, space_id, items, parent, root, errors):
+    """Создаёт страницы дерева любой глубины и сверяет, что содержимое сохранилось."""
+    count = 0
+    for index, item in enumerate(items):
+        content = page_text(item, root)
+        page_id = client.import_page(space_id, content)
+        client.post("/api/pages/move", {"pageId": page_id, "parentPageId": parent, "position": f"a{index:04d}"})
+        saved = client.post("/api/pages/info", {"pageId": page_id, "format": "markdown"})["data"]["content"]
+        if len(saved) < 0.7 * len(content) or content.count("```mermaid") != saved.count("```mermaid"):
+            errors.append(f"{item['title']}: {len(content)} -> {len(saved)}")
+        count += 1 + publish_tree(client, space_id, item.get("children", []), page_id, root, errors)
+    return count
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--root", default=".", type=pathlib.Path)
@@ -100,19 +114,8 @@ def main():
     for page in client.post("/api/pages/sidebar-pages", {"spaceId": space_id, "limit": 100})["data"]["items"]:
         client.post("/api/pages/delete", {"pageId": page["id"], "permanentlyDelete": True})
 
-    count, errors = 0, []
-    for i, item in enumerate(config["tree"]):
-        page_id = client.import_page(space_id, page_text(item, root))
-        client.post("/api/pages/move", {"pageId": page_id, "parentPageId": None, "position": f"a{i:04d}"})
-        count += 1
-        for j, child in enumerate(item.get("children", [])):
-            content = page_text(child, root)
-            child_id = client.import_page(space_id, content)
-            client.post("/api/pages/move", {"pageId": child_id, "parentPageId": page_id, "position": f"a{j:04d}"})
-            count += 1
-            saved = client.post("/api/pages/info", {"pageId": child_id, "format": "markdown"})["data"]["content"]
-            if len(saved) < 0.7 * len(content) or content.count("```mermaid") != saved.count("```mermaid"):
-                errors.append(f"{child['title']}: {len(content)} -> {len(saved)}")
+    errors = []
+    count = publish_tree(client, space_id, config["tree"], None, root, errors)
 
     print(f"Опубликовано страниц: {count}")
     print(f"Открыть: {config['url'].rstrip('/')}/s/{config['space']['slug']}")

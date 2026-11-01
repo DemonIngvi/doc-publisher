@@ -52,8 +52,26 @@ def label(text, limit=LABEL_LIMIT):
     return text if len(text) <= limit else text[:limit - 1].rsplit(" ", 1)[0] + "…"
 
 
+PALETTE = [
+    "classDef self fill:#c5cae9,stroke:#3949ab,color:#1a237e,stroke-width:2px",
+    "classDef comp fill:#e8eaf6,stroke:#5c6bc0,color:#1a237e",
+    "classDef user fill:#e3f2fd,stroke:#1565c0,color:#0d47a1",
+    "classDef ext fill:#fff3e0,stroke:#ef6c00,color:#e65100",
+    "classDef store fill:#e8f5e9,stroke:#43a047,color:#1b5e20",
+    "classDef start fill:#e8f5e9,stroke:#43a047,color:#1b5e20,stroke-width:2px",
+    "classDef task fill:#ffffff,stroke:#3949ab,color:#1a237e",
+    "classDef gate fill:#fff8e1,stroke:#f9a825,color:#6d4c00",
+    "classDef error fill:#ffebee,stroke:#e53935,color:#b71c1c,stroke-width:2px",
+    "classDef finish fill:#eceff1,stroke:#37474f,color:#263238,stroke-width:3px",
+]
+SHAPES = {"start": ('(("', '"))', "start"), "task": ('["', '"]', "task"), "gateway": ('{"', '"}', "gate"),
+          "error": ('(["', '"])', "error"), "end": ('(("', '"))', "finish")}
+LANE = "fill:#f5f6fb,stroke:#c5cae9,color:#3949ab"
+LEGEND = "🟢 начало · ▭ задача · 🔶 развилка · 🔴 ошибка · ⚫ конец"
+
+
 def diagram(lines):
-    return "\n".join(["```mermaid", *lines, "```"])
+    return "\n".join(["```mermaid", *lines, *["  " + line for line in PALETTE], "```"])
 
 
 def table(header, rows):
@@ -76,10 +94,10 @@ def c1(model):
     lines = ["graph LR"]
     consumers = {c for s in model.services.values() for c in s["consumers"] if c in model.actors}
     for key in sorted(consumers):
-        lines.append(f'  {node(key)}(["{label(model.actors[key]["title"])}"])')
+        lines.append(f'  {node(key)}(["{label(model.actors[key]["title"])}"]):::user')
     for key, unit in model.systems.items():
-        shape = f'{node(key)}["{label(unit["title"])}"]' if unit["kind"] == "own" else f'{node(key)}[/"{label(unit["title"])}"/]'
-        lines.append(f"  {shape}")
+        style = "self" if unit["kind"] == "own" else "ext"
+        lines.append(f'  {node(key)}["{label(unit["title"])}"]:::{style}')
     edges = collections.defaultdict(list)
     for key, unit in model.integrations.items():
         ends = model.system_of(unit["from"]), model.system_of(unit["to"])
@@ -100,14 +118,15 @@ def c2(model):
     for system, unit in model.systems.items():
         inner = {k: u for k, u in model.components.items() if u["system"] == system}
         if not inner:
-            lines.append(f'  {node(system)}[/"{label(unit["title"])}"/]')
+            lines.append(f'  {node(system)}["{label(unit["title"])}"]:::ext')
             continue
         lines.append(f'  subgraph {node("sys_" + system)}["{label(unit["title"])}"]')
         for key, item in inner.items():
-            lines.append(f'    {node(key)}["{label(item["title"])}"]')
+            lines.append(f'    {node(key)}["{label(item["title"])}"]:::comp')
         lines.append("  end")
+        lines.append(f"  style {node('sys_' + system)} {LANE}")
     for key, unit in model.stores.items():
-        lines.append(f'  {node(key)}[("{label(unit["title"], 30)}")]')
+        lines.append(f'  {node(key)}[("{label(unit["title"], 30)}")]:::store')
         if unit["owner"] in model.components:
             lines.append(f"  {node(unit['owner'])} --> {node(key)}")
     for key, unit in model.integrations.items():
@@ -123,7 +142,7 @@ def block_diagram(blocks):
     lines = ["graph LR"]
     titles = {block["title"]: block["id"] for block in blocks}
     for block in blocks:
-        lines.append(f'  {node(block["id"])}["{label(block["title"])}"]')
+        lines.append(f'  {node(block["id"])}["{label(block["title"])}"]:::comp')
     outside, seen = {}, set()
     for block in blocks:
         for item in block.get("io", []):
@@ -133,7 +152,7 @@ def block_diagram(blocks):
             if pair not in seen and pair[0] != pair[1]:
                 seen.add(pair)
                 lines.append(f"  {node(pair[0])} --> {node(pair[1])}")
-    lines += [f'  {node(key)}[/"{label(name, 30)}"/]' for name, key in outside.items()]
+    lines += [f'  {node(key)}["{label(name, 30)}"]:::ext' for name, key in outside.items()]
     return diagram(lines)
 
 
@@ -159,10 +178,12 @@ def card(block):
     return f"### {block['title']}\n\n" + table(["Поле", "Значение"], fields)
 
 
-def cards(model):
+def cards(model, only=None):
     parts = []
     current = None
     for owner, block in model.blocks:
+        if only and owner != only:
+            continue
         if owner != current:
             parts.append(f"## {model.title(owner)}")
             current = owner
@@ -171,17 +192,62 @@ def cards(model):
 
 
 def process_diagram(model, unit):
+    """Схема с дорожками: если у шагов есть переходы, рисуются они, иначе шаги идут цепочкой."""
     lines = ["graph LR"]
-    steps = [(f"step_{index}", step) for index, step in enumerate(unit["steps"], 1)]
+    steps = [(step.get("id", f"step_{index}"), step) for index, step in enumerate(unit["steps"], 1)]
     lanes = collections.defaultdict(list)
     for key, step in steps:
         lanes[step["actor"]].append((key, step))
     for lane, items in lanes.items():
         lines.append(f'  subgraph {node("lane_" + lane)}["{label(model.title(lane), 30)}"]')
-        lines += [f'    {node(key)}["{index}. {label(step["title"], 34)}"]' for key, step in items for index in [int(key.split("_")[1])]]
+        for key, step in items:
+            left, right, style = SHAPES[step.get("type", "task")]
+            lines.append(f'    {node(key)}{left}{label(step["title"], 70)}{right}:::{style}')
         lines.append("  end")
-    lines += [f"  {node(a[0])} --> {node(b[0])}" for a, b in zip(steps, steps[1:])]
+        lines.append(f"  style {node('lane_' + lane)} {LANE}")
+    known = {key for key, _ in steps}
+    if any(step.get("next") for _, step in steps):
+        for key, step in steps:
+            for item in step.get("next", []):
+                if item["to"] in known:
+                    text = f'|"{label(item["label"], 24)}"|' if item.get("label") else ""
+                    lines.append(f"  {node(key)} -->{text} {node(item['to'])}")
+    else:
+        lines += [f"  {node(a[0])} --> {node(b[0])}" for a, b in zip(steps, steps[1:])]
     return diagram(lines)
+
+
+def load_stories(model):
+    folder = model.arch / "stories"
+    stories = [load_yaml(path) for path in folder.glob("*.yaml")] if folder.exists() else []
+    return sorted(stories, key=lambda s: [int(part) for part in s["number"].split(".")])
+
+
+def story_card(story, blocks):
+    """Карточка истории: выноска с ролью, целью и критериями."""
+    criteria = "\n".join(f"- [ ] {item}" for item in story["accept"])
+    goal = f"**Хочу:** {story['want']}" + (f"\n\n**Чтобы:** {story['so_that']}" if story.get("so_that") else "")
+    links = [f"**Требования:** {codes(story['reqs'])}"]
+    if blocks:
+        links.append(f"**Блоки:** {', '.join(blocks)}")
+    head = f"### {story.get('source', story['id'])} · история {story['number']}"
+    return f"{head}\n\n:::info\n**{story['role']}**\n\n{goal}\n:::\n\n{criteria}\n\n{' · '.join(links)}"
+
+
+def stories_view(model, component):
+    parts = []
+    processes = [u for u in model.processes.values() if u.get("component") == component]
+    for number, unit in enumerate(processes, 1):
+        parts += [f"## Процесс {number}. {unit['title']}", f"Покрывает истории: {codes(unit.get('stories', []))}", process_diagram(model, unit), LEGEND]
+    stories = [s for s in load_stories(model) if s["component"] == component]
+    by_story = collections.defaultdict(list)
+    for owner, block in model.blocks:
+        for number in block.get("stories", []):
+            by_story[number].append(block["title"])
+    if stories:
+        parts += ["## Сводка", table(["История", "Роль", "Что хочет", "Критериев"], [[s.get("source", s["id"]), s["role"], s["want"], len(s["accept"])] for s in stories]), "## Истории"]
+        parts += [story_card(s, by_story[s["number"]]) for s in stories]
+    return "\n\n".join(parts) or "Историй пока нет."
 
 
 def how_it_works(model):
@@ -261,8 +327,12 @@ def readiness(model):
     return "\n\n".join(parts)
 
 
-VIEWS = {"c1": c1, "c2": c2, "c3": c3, "cards": cards, "how": how_it_works, "data": data_view, "registers": registers, "coverage": coverage, "readiness": readiness}
+VIEWS = {"c1": c1, "c2": c2, "c3": c3, "cards": cards, "stories": stories_view, "how": how_it_works, "data": data_view, "registers": registers, "coverage": coverage, "readiness": readiness}
 
 
 def render(name, title, root):
-    return f"# {title}\n\n> Страница собрана из файлов проекта, правьте источник.\n\n{VIEWS[name](Model(root))}\n"
+    """Имя вида может нести аргумент: stories:agent-runner."""
+    view, _, argument = name.partition(":")
+    model = Model(root)
+    body = VIEWS[view](model, argument) if argument else VIEWS[view](model)
+    return f"# {title}\n\n> Страница собрана из файлов проекта, правьте источник.\n\n{body}\n"
