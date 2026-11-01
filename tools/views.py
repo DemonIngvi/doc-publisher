@@ -25,6 +25,7 @@ class Model:
         self.sequences = [load_yaml(p) for p in self.paths("sequences")]
         self.endpoints = {p.parent.name: load_yaml(p) for p in self.arch.glob("components/*/endpoints.yaml")}
         self.approvals = {p.parent.name: load_yaml(p)["rows"] for p in self.arch.glob("components/*/approvals.yaml")}
+        self.imported = {p.parent.name for p in self.arch.glob("components/*/approvals.yaml") if load_yaml(p).get("origin") == "imported"}
         decisions = self.arch / "decisions"
         self.decisions = [load_yaml(decisions / f"{d}.yaml") for d in load_yaml(decisions / "_order.yaml")["order"]] if decisions.exists() else []
         report = root / "_quality" / "check-report.yaml"
@@ -315,7 +316,7 @@ def svg_for(name, model):
         return svg.bpmn(model.processes[key], model.title)
     if kind == "score":
         state = component_score(model, key)
-        return svg.score(model.title(key), state["value"], state["status"], state["parts"], state["roles"])
+        return svg.score(model.title(key), state["value"], state["status"], state["parts"], state["roles"], key in model.imported)
     if kind == "passport":
         inputs, outputs = ports(model, key)
         pair = lambda items: [(code, model.title(other), other not in model.components) for code, other, _ in items]
@@ -441,7 +442,8 @@ def spec_view(model, key):
         if decisions:
             marks.append(f"**Решения:** {codes(decisions)}")
         if confirmed:
-            marks.append(f"**Роли:** {sum(r['decision'] == '✅' for r in confirmed)} из {len(confirmed)}")
+            note = " (перенесено, не перепроверялось)" if key in model.imported else ""
+            marks.append(f"**Роли{note}:** {sum(r['decision'] == '✅' for r in confirmed)} из {len(confirmed)}")
         parts += [f"## {code}. {title}", f":::info\n{' · '.join(marks)}\n:::", text.strip().replace("**Consequences (testable):**", "**Сценарии**")]
     return "\n\n".join(parts) or "Требований пока нет."
 

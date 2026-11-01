@@ -134,7 +134,7 @@ def passport(title, subtitle, inputs, outputs):
     return "".join(out) + "</svg>"
 
 
-def score(title, value, status, parts, roles):
+def score(title, value, status, parts, roles, imported=False):
     """Полоска готовности: значение, разбивка по частям и подтверждения ролей."""
     width, height = 1040, 118
     out = start(width, height)
@@ -150,10 +150,12 @@ def score(title, value, status, parts, roles):
         x += 24 + len(chunk) * 6.9
     x = 24
     for role, done, total in roles:
-        fill = "#2e7d32" if done == total else "#9e9e9e"
+        fill = "#2e7d32" if done == total and not imported else "#9e9e9e"
         out.append(f'<circle cx="{x + 11}" cy="94" r="11" fill="{fill}"/><text x="{x + 11}" y="98" style="font-size:11px;font-weight:700;text-anchor:middle;fill:#fff">{esc(role[0])}</text>')
         out.append(f'<text x="{x + 27}" y="98" style="font-size:11px;fill:#546e7a">{done}/{total}</text>')
         x += 76
+    if imported:
+        out.append(f'<text x="{x + 8}" y="98" style="font-size:11px;font-weight:600;fill:#b26a00">перенесено, не перепроверялось</text>')
     if not roles:
         out.append('<text x="24" y="98" style="font-size:11px;fill:#546e7a">Подтверждений ролей нет</text>')
     return "".join(out) + "</svg>"
