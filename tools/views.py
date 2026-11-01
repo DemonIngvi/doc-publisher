@@ -111,8 +111,14 @@ def table(header, rows):
     rows = [list(row) for row in rows]
     keep = [i for i in range(len(header)) if i == 0 or any(str(row[i]).strip() not in ("", "—", "нет") for row in rows)]
     lines = ["| " + " | ".join(header[i] for i in keep) + " |", "| " + " | ".join("---" for _ in keep) + " |"]
-    lines += ["| " + " | ".join(str(row[i]).replace("|", "/").replace("\n", " ") for i in keep) + " |" for row in rows]
+    lines += ["| " + " | ".join(cell(row[i]) for i in keep) + " |" for row in rows]
     return "\n".join(lines)
+
+
+def cell(value):
+    """Символ разделителя таблицы заменяется, но метка ссылки [[страница|текст]] остаётся целой."""
+    parts = re.split(r"(\[\[.*?\]\])", str(value).replace("\n", " "))
+    return "".join(part if index % 2 else part.replace("|", "/") for index, part in enumerate(parts))
 
 
 def codes(items):
